@@ -33,8 +33,8 @@ xpt = [1.45339,-1.20574] #xpt[0] is R position, xpt[1] is Z position
 theta0 = -0.95*(atan((R0_a-xpt[0])/(Z0-xpt[1]))+pi/2) #this is the angle in radians between the geometric axis and the xpoint.
 
 #Parameters to control the meshing in the plasma region
-thetapts = 20 # this number is used for both the miller model calculations and the mesh
-rpts = 30 #number of radial points for 0<=rho<=1 used in miller
+thetapts = 1000 # this number is used for both the miller model calculations and the mesh
+rpts = 20 #number of radial points for 0<=rho<=1 used in miller
 rmeshnum_p = 6
 rmeshnum_s = 5
 
@@ -125,22 +125,56 @@ def shafranov_shift(R0_a,a,R,Z,r,theta,thetapts,tri,kappa,p,j_r_ave,s,rpts):
     
     return [R0,dR0dr,B_p_bar,L_seg]
     
-def x_stretch(n,theta0,yscale,b):
-    k = 100/(b+1)
+
     
-    x = np.linspace(-1,1,num=round(100/k+1)) #num should be odd number so there is a middle point to line up exactly with theta0
-    y = np.piecewise(x,[x < 0, x >= 0],[lambda x: (1-abs((-x)**(1./3))**n), lambda x: (1-abs((x)**(1./3))**n)])
+def x_stretch(n1,n2,theta0,yscale,epsilon,thetaW):
     
-    #bump = np.where(abs(x)<k,1/k*(1/0.49)*np.exp(-1/(1-((x)/k)**2)),0)
-    bump = np.where(abs(x)<k,1/k*(1/0.49)*np.exp(-1/(1-((x)/k)**2)),0)
+    def f_sep(n1,n2,x):
+        f = np.piecewise(
+                            x,
+                            
+                            [x <= -1, #condition 1
+                             np.logical_and((-1 < x),(x <= 0)), #condition 2
+                             np.logical_and(( 0 < x),(x <= 1)), #condition 3
+                             x>1], #condition 4
+                             
+                             [lambda x: 0, #function for condition 1
+                              lambda x: (1.0-abs(x)**n2)**n1, #function for condition 2
+                              lambda x: (1.0-abs(x)**n2)**n1, #function for condition 3
+                              lambda x: 0] #function for condition 4
+                             )
+        return f 
+
+    #xnum=201 # number of points on the x axis for the mollification. Should be odd and any integer >~ 20 will work. We're using 201 and it works well.
+    if epsilon > 0: #for everywhere except the seperatrix, mollify seperatrix function with bump function
+        xnum =  int(round(107/epsilon))
+        x = np.linspace(-1,1,num=xnum) #num should be odd number so there is a middle point to line up exactly with theta0
+        
+        #Seperatrix function that will get convolved with the bump function
+        f = f_sep(n1,n2,x*(1-epsilon))
+        
+        #Bump function that will get convolved with the seperatrix function
+        eta_epsilon = np.where(
+                    abs(x)<epsilon,
+                    1/epsilon*1/0.49*np.exp(-1/(1-((x)/epsilon)**2)),
+                    0
+                    )
+        
+        #convolve bump and seperatrix function
+        y = np.convolve(f,eta_epsilon,'same')/(xnum/2)
+    else:
+        xnum = 101
+        x = np.linspace(-1,1,num=xnum)
+        y = f_sep(n1,n2,x*(1-epsilon))
+        
+    #Scale the resulting function vertically to match the x-point and horizontally to meet the inboard and outboard midplanes
+    y = y*yscale
     
-    f = np.convolve(y,bump,'same')/round(200/k+1)*2
-    f = f-min(f)
-    f = f*yscale/np.amax(f)
-    x = x+theta0
-    func1 = interp1d(x,f,bounds_error=0,fill_value=0)
+    x = x*thetaW+theta0
+    func1 = interp1d(x,y,bounds_error=0,fill_value=0)
+    
     x = x + 2*pi
-    func2 = interp1d(x,f,bounds_error=0,fill_value=0)
+    func2 = interp1d(x,y,bounds_error=0,fill_value=0)
 
     return [func1,func2]
 
@@ -177,7 +211,6 @@ theta3      = np.delete(np.linspace(pi/2,pi,thetapts3), -1)
 #To deal with this, miller_func will pass back soltheta1, soltheta4, and the necessary information
 #to calculate soltheta23, i.e., thetapts1 and thetapts4, because that's how many points it will need to
 #delete from the beginning and end of the array it uses. See plasma_mesh for more information.    
-
 
 theta4      = np.linspace(pi,theta0+2*pi,thetapts4)
 #soltheta4   = np.linspace(pi,xtheta2,thetapts4) #angles of poloidal meshes in SOL region 4 (between Inboard midplane and xtheta2)
@@ -218,20 +251,22 @@ xmil=1 #turn x-point stuff on or off. It's much faster with it off.
 if xmil == 1:
     xkappa1 = np.zeros(s)
     xkappa2 = np.zeros(s)
+    stpt = 0
     for i in range(0,rpts):
-        if r[i,0] > 0.8*a:
-            #b = np.rint(100/(0.3*a)*(-0.7*a))
-            b = 100/(1-r[i,0]/a+0.001)
-            yscale = (r[i,0]/a-.8)/(1-.8)
-            theta0 = theta0
-            n = 2.0
-            func1 = x_stretch(n,theta0,yscale,b)[0] #centers function at theta0
-            func2 = x_stretch(n,theta0,yscale,b)[1] #centers function at theta0 + 2*pi
+        if r[i,0] >= stpt*a:
+            epsilon = (1.0-((r[i,0]/a-stpt)/(1.0-stpt))**5)
+            yscale = ((r[i,0]/a-stpt)/(1-stpt))**5
+            n1 = 2
+            n2 = 1.0
+            thetascale1 = 1*abs(theta0)
+            thetascale2 = pi-abs(theta0)
+            func1 = x_stretch(n1,n2,theta0,yscale,epsilon,thetascale1)[0] #centers function at theta0
+            func2 = x_stretch(n1,n2,theta0,yscale,epsilon,thetascale2)[1] #centers function at theta0 + 2*pi
             for j in range(0,thetapts):
                 xkappa1[i,j] = func1(theta[i,j])
                 xkappa2[i,j] = func2(theta[i,j])  
-                
-    kappa = kappa + xkappa1/1.5 + xkappa2/1.5
+            xkappa = xkappa1 + xkappa2    
+    kappa = kappa + yscale*xkappa*(xpt[1]/sin(theta0)/a-kappa)
 
 #synthesize density and temperature distributions based on parabola-to-a-power-on-a-pedestel model
 ni     = np.where(r<0.9*a,(ni0-ni9)*(1-(r/a)**2)**nu_ni + ni9,(ni_sep-ni9)/(0.1*a)*(r-0.9*a)+ni9)
@@ -283,6 +318,12 @@ f2 = cos(arcsin(tri)*sin(theta))+dR0dr*cos(theta)+(s_k -s_tri*cos(theta)+(1+s_k)
 
 dPsidr = B_phi_0 * R[0,0]/(2*pi*q)*np.tile(np.sum(f2 * L_seg/(R * f1),axis=1), (thetapts, 1)).T
 
+Psi = np.zeros(r.shape)
+for index,row in enumerate(r):
+    if index >= 1:
+        Psi[index] = dPsidr[index]*(r[index,0]-r[index-1,0]) + Psi[index-1]
+Psi_norm = Psi / Psi[-1,0]
+
 B_p = dPsidr * f1 / (R*f2)  
 B_p[0,:]=0
 
@@ -295,6 +336,6 @@ ax1 = fig.add_subplot(111)
 ax1.axis('equal')
 ax1.set_xlim(np.amin(R)*1.1,np.amax(R)*1.1)
 ax1.set_ylim(np.amin(Z)*1.1,np.amax(Z)*1.1)
-CS = ax1.contourf(R,Z,r,500) #plot something calculated by miller
+CS = ax1.contourf(R,Z,B_p,500) #plot something calculated by miller
 plt.colorbar(CS)
 ax1.plot(R.flatten(),Z.flatten(),lw=1,color='black')
